@@ -1,9 +1,13 @@
-#include "main.h"
-#include "parse_split.h"
 
-node* create_node(enum Type type, char* oper, char* comm, node* right, node* left){
+#include "main.h"
+#include "parse_split_jobs.h"
+
+job* jobs = NULL;
+
+node* create_node(enum Type type, enum Ground grnd, char* oper, char* comm, node* right, node* left){
   node* tmp = (node*)malloc(sizeof(node));
   tmp->type = type;
+  tmp->grnd = grnd;
   tmp->oper = oper;
   tmp->comm = comm;
   tmp->right = right;
@@ -12,8 +16,12 @@ node* create_node(enum Type type, char* oper, char* comm, node* right, node* lef
 }
 
 node* parse_comm(char** sent, int* ind){
-  node* comm = create_node(OPERATION, NULL, sent[*ind], NULL, NULL);
+  node* comm = create_node(OPERATION, FOREGROUND, NULL, sent[*ind], NULL, NULL);
   (*ind)++;
+  if (sent[*ind] != NULL && !strcmp(sent[*ind], "&")){
+    comm -> grnd = BACKGROUND;
+    (*ind)++;
+  }
   return comm;
 }
 
@@ -24,7 +32,7 @@ node* parse_redirect_left(char** sent, int* ind){
     strcpy(oper, sent[*ind]);
     (*ind)++;
     node* right = parse_redirect_left(sent, ind);
-    left = create_node(REDIRECT, oper, NULL, right, left);
+    left = create_node(REDIRECT, FOREGROUND, oper, NULL, right, left);
   }
   return left;
 }
@@ -36,7 +44,7 @@ node* parse_redirect_right(char** sent, int* ind){
     strcpy(oper, sent[*ind]);
     (*ind)++;
     node* right = parse_redirect_right(sent, ind);
-    left = create_node(REDIRECT, oper, NULL, right, left);
+    left = create_node(REDIRECT, FOREGROUND, oper, NULL, right, left);
   }
   return left;
 }
@@ -48,7 +56,7 @@ node* parse_pipe(char** sent, int* ind){
     strcpy(oper, sent[*ind]);
     (*ind)++;
     node* right = parse_pipe(sent, ind);
-    left = create_node(REDIRECT, oper, NULL, right, left);
+    left = create_node(REDIRECT, FOREGROUND, oper, NULL, right, left);
   }
   return left;
 }
@@ -58,7 +66,7 @@ node* parse_and(char** sent, int* ind){
   while(sent[*ind] != NULL && !strcmp(sent[*ind], "&&")){
     (*ind)++;
     node* right = parse_and(sent, ind);
-    left = create_node(LOGIC, "&&", NULL, right, left);
+    left = create_node(LOGIC, FOREGROUND, "&&", NULL, right, left);
   }
   return left;
 }
@@ -68,7 +76,7 @@ node* parse_or(char** sent, int* ind){
   while(sent[*ind] != NULL && !strcmp(sent[*ind], "||")){
     (*ind)++;
     node* right = parse_or(sent, ind);
-    left = create_node(LOGIC, "||", NULL, right, left);
+    left = create_node(LOGIC, FOREGROUND, "||", NULL, right, left);
   }
   return left;
 }
@@ -78,7 +86,7 @@ node* parse_continue(char** sent, int* ind){
   while(sent[*ind] != NULL && !strcmp(sent[*ind], ";")){
     (*ind)++;
     node* right = parse_continue(sent, ind);
-    left = create_node(LOGIC, ";", NULL, right, left);
+    left = create_node(LOGIC, FOREGROUND, ";", NULL, right, left);
   }
   return left;
 }
@@ -94,7 +102,7 @@ char* exp_comm(const char* exp){
   int sz = BUF_MAX, i = 0;
   
   for(; exp[i] != '\0' && exp[i] != ' '; i++){
-    if(i >= sz){
+    if(i > sz){
       sz += BUF_MAX;
       tmp = (char*)realloc(tmp, sz);
     }
@@ -106,16 +114,15 @@ char* exp_comm(const char* exp){
 }
 
 char** exp_arg(const char* exp) {
-  
   int arg_sz = 1;
   char** arg = malloc((arg_sz + 1) * sizeof(char*));
   int arg_ind = 0;
   char* tmp = malloc(BUF_MAX);
   int tmp_ind = 0;
-
-  for(int i = 0; exp[i] != '\0'; i++){
-    if(exp[i] == ' '){
-      while(exp[i+1] == ' ') i++;
+  for (int i = 0; exp[i] != '\0'; i++){
+    if (exp[i] == ' '){
+      while(exp[++i] == ' ');
+      i--;
       tmp[tmp_ind] = '\0';
       arg[arg_ind] = malloc(strlen(tmp) + 1);
       strcpy(arg[arg_ind++], tmp);
@@ -124,17 +131,31 @@ char** exp_arg(const char* exp) {
       tmp[tmp_ind++] = exp[i];
     }
   }
-
-  tmp[tmp_ind++] = '\0';
-  arg[arg_ind] = (char*)malloc(tmp_ind + 1);
+  tmp[tmp_ind] = '\0';
+  arg[arg_ind] = malloc(strlen(tmp) + 1);
   strcpy(arg[arg_ind++], tmp);
   arg[arg_ind] = NULL;
-  
   return arg;
 }
 
-int exp_exe(const char* exp) {
+int exp_exe(const char* exp, enum Ground grnd) {
   int stat;
+
+  if(!strcmp(exp_comm(exp), "exit") || !strcmp(exp_comm(exp), "q")){
+    printf("ну бывай!\n");
+    exit(1);
+  }
+
+  if (!strcmp(exp_comm(exp), "jobs")){
+    print_jobs(jobs);
+    return 0;
+  }
+  if (!strcmp(exp_comm(exp), "kill")){
+    kill(atoi(exp_arg(exp)[1]), SIGKILL);
+    delete_job(&jobs, atoi(exp_arg(exp)[1]));
+    return 0;
+  }
+
   if(!strcmp(exp_comm(exp), "cd")){
     if(chdir(exp_arg(exp)[1])){
       printf(RED "ОШИБКА" RESET ": дирректории [%s] не существует. Возможно указан неверный путь.\n", exp_arg(exp)[1]);
@@ -142,17 +163,54 @@ int exp_exe(const char* exp) {
     }
     return 0;
   }
+
+  if (!strcmp(exp_comm(exp), "fg")) {
+    if (jobs == NULL) {
+        printf("Нет background процессов для восстановления.\n");
+        return 1;
+    }
+
+    job* last_job = jobs; // jobs хранит список задач, начнем с головы
+    while (last_job->nxt != NULL) {
+        last_job = last_job->nxt; // ищем последний процесс
+    }
+
+    pid_t pid = last_job->pid; // получаем PID последнего процесса
+    printf("pid: %d", pid);
+    if (pid > 0) {
+        kill(pid, SIGCONT); // Отправляем сигнал продолжения
+        int stat;
+        waitpid(pid, &stat, 0); // Ждем завершения процесса
+        delete_job(&jobs, pid); // Удаляем процесс из списка jobs
+        return WIFEXITED(stat) ? WEXITSTATUS(stat) : -1;
+    } else {
+        printf("Невалидный PID: %d\n", pid);
+        return 1;
+    }
+}
+
   pid_t pid = fork();
   if(pid == 0){
-    if(execvp(exp_comm(exp), exp_arg(exp))){
-      printf(RED "ОШИБКА" RESET ": команды [%s] не существует. Попробуйте другую команду.\n", exp_comm(exp));
-    };
+    if(grnd == BACKGROUND){
+      int dev_null = open("/dev/null", O_RDWR);
+      dup2(dev_null, STDIN_FILENO);
+      dup2(dev_null, STDOUT_FILENO);
+      dup2(dev_null, STDERR_FILENO);
+      close(dev_null);
+    }
+    execvp(exp_comm(exp), exp_arg(exp));
     exit(EXIT_FAILURE);
   }else if(pid < 0){
     perror("ошибка создания процесса\n");
     return 1;
   }else{
-    waitpid(pid, &stat, 0);
+    push_job(jobs, pid, exp_comm(exp));
+    if(grnd == BACKGROUND){
+      printf("background процесс - %d\n", pid);
+    }else{
+      waitpid(pid, &stat, 0);
+      delete_job(&jobs, pid);
+    }
     if(WIFEXITED(stat)) {
       return WEXITSTATUS(stat);
     }else{
@@ -174,7 +232,8 @@ int tree_exe(node* root){
   if(root == NULL) return 0;
 
   if(root->type == OPERATION){
-    return exp_exe(root->comm);
+    return exp_exe(root->comm, root->grnd);
+
   } else if(root->type == LOGIC){
     int left_stat = tree_exe(root->left);
     if(!strcmp(root->oper, "&&")){
@@ -274,5 +333,81 @@ int tree_exe(node* root){
       }
     }
   }
+  return 0;
+}
+
+void print_prompt(){
+  char pth[PATH_MAX];
+  char* pthptr;
+  pthptr = getwd(pth);
+  printf(GRN "mishbash" RESET ":" BLU "%s" RESET "$ ", pth);
+}
+
+void handle_signal(int sig) {
+    printf("\n");
+    fflush(stdout);
+}
+
+
+void handle_sigchld(int sig) {
+    while (waitpid(-1, NULL, WNOHANG) > 0);
+}
+
+
+void setup_signal_handlers() {
+    struct sigaction sa;
+    
+    sa.sa_handler = handle_signal;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART;
+
+    if (sigaction(SIGINT, &sa, NULL) == -1) {
+        perror("sigaction SIGINT");
+        exit(EXIT_FAILURE);
+    }
+    if (sigaction(SIGTSTP, &sa, NULL) == -1) {
+        perror("sigaction SIGTSTP");
+        exit(EXIT_FAILURE);
+    }
+    if (sigaction(SIGQUIT, &sa, NULL) == -1) {
+        perror("sigaction SIGQUIT");
+        exit(EXIT_FAILURE);
+    }
+     sa.sa_handler = handle_sigchld;
+    sigaction(SIGCHLD, &sa, NULL);
+}
+
+void reset_signal_handlers() {
+    struct sigaction sa;
+    sa.sa_handler = SIG_DFL;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGTSTP, &sa, NULL);
+    sigaction(SIGQUIT, &sa, NULL);
+}
+
+int main() {
+  jobs = create_job(getpid(), "mishbash");
+  setup_signal_handlers();
+  signal(SIGCHLD, handle_sigchld);
+  while(1){
+    print_prompt();
+    char *sentence = readline();
+    if(!strcmp(sentence, "\0")) continue;
+    char **splitted_sent = split(sentence);
+    /*
+    for (int i = 0; splitted_sent[i] != NULL; i++){
+      printf("[%s]\n", splitted_sent[i]);
+    }
+    */
+    node* tree = parse(splitted_sent);
+    tree_exe(tree);
+    free(sentence);
+    free_tree(tree);
+    free(splitted_sent);
+  }
+
   return 0;
 }

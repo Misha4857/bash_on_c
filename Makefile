@@ -1,8 +1,7 @@
 CC = gcc
-
 TARGET = bash
 
-SRC = bash_parse.c bash_split.c bash_main.c
+SRC = bash_jobs.c bash_parse.c bash_split.c
 
 OBJ = $(SRC:.c=.o)
 
